@@ -1,0 +1,405 @@
+// 该版本已弃用，请转origin: https://raw.githubusercontent.com/Sakyvo/sing-mix/refs/heads/main/sing-mix_origin
+
+// ====================
+// 0. 特殊域名处理(手动添加)
+// ====================
+
+// 强制直连
+const BYPASS_DOMAINS = [
+  "example.com", "example.org"
+];
+
+// 强制代理
+const FORCE_PROXY_DOMAINS = [
+  "test.com", "test.org"
+];
+
+// 更建议使用代理软件自带的过滤
+// 脚本更新会导致该部分配置丢失
+
+// ====================
+// 1. 常量配置
+// ====================
+const SETTINGS = {
+  ICON_BASE: "https://cdn.jsdelivr.net/gh/Koolson/Qure@master/IconSet/Color/",
+  GEOIP_URL: "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.dat",
+  GEOSITE_URL: "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geosite.dat",
+
+  URL_TEST_EXTRA: {
+    hidden: true,
+    url: "https://www.g.cn/generate_204",
+    interval: 900,
+    tolerance: 50,
+    lazy: true,
+    timeout: 1000
+  },
+
+  // BetterFB 本质仍是 url-test，但新增 max-failed-times: 1
+  // 解决“节点超时却不第一时间切换”的问题，同时保留高 tolerance 的稳定性
+  BETTER_FB_EXTRA: {
+    hidden: true,
+    url: "https://www.g.cn/generate_204",
+    interval: 900,
+    tolerance: 750,
+    lazy: true,
+    timeout: 1000,
+    "max-failed-times": 1   
+  },
+
+  FILTER_REGEX: /群|邀请|返利|官网|官方|网址|订阅|购买|续费|剩余|到期|过期|流量|备用|邮箱|客服|联系|工单|倒卖|防止|梯子|tg|telegram|电报|发布|重置/i
+};
+
+// ====================
+// 2. 基础工具（以下全部保持不变）
+// ====================
+const uniq = (arr = []) => [...new Set(arr.filter(Boolean))];
+
+const escapeRegex = (s = "") =>
+  String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const normalizeName = (name = "") =>
+  String(name)
+    .replace(/(IEPL|IPLC|BGP|RELAY|PRO|V\d+)/ig, " $1 ")
+    .replace(/[【】\[\]（）()|_\-.,/:~]/g, " ")
+    .replace(/🇭🇰/g, " HK ")
+    .toUpperCase()
+    .replace(/\s+/g, " ")
+    .trim();
+
+const buildRegex = (arr = []) =>
+  new RegExp(
+    arr
+      .map((raw) => {
+        const token = String(raw).trim().toUpperCase();
+        const escaped = escapeRegex(token);
+        return /^[A-Z]{2,3}$/.test(token)
+          ? `(?:^|[^A-Z])${escaped}(?:[^A-Z]|$)`
+          : escaped;
+      })
+      .join("|"),
+    "i"
+  );
+
+const HK_REGEX = buildRegex(["香港", "HK", "HKG", "HONGKONG", "HONG KONG"]);
+
+const buildFakeIpFilter = (bypass = []) =>
+  uniq([
+    "geosite:private",
+    "geosite:google-cn",
+    "geosite:synology",
+    "geosite:cn",
+    ...uniq(
+      bypass.flatMap((domain) => {
+        const d = String(domain || "").trim();
+        if (!d) return [];
+        return d.includes("*") || d.startsWith("+.") ? [d] : [`+.${d}`];
+      })
+    )
+  ]);
+
+const mergeRules = (baseRules = [], extraRules = []) => {
+  const extra = Array.isArray(extraRules) ? extraRules.filter(Boolean) : [];
+  if (!extra.length) return baseRules.slice();
+
+  const matchIndex = baseRules.findIndex(
+    (rule) => String(rule).trim().toUpperCase() === "MATCH,全部"
+  );
+
+  if (matchIndex === -1) return uniq([...baseRules, ...extra]);
+
+  return uniq([
+    ...baseRules.slice(0, matchIndex),
+    ...extra,
+    ...baseRules.slice(matchIndex)
+  ]);
+};
+
+const pickDirectRules = (rules = []) =>
+  rules.filter((rule) => {
+    const r = String(rule || "").trim();
+    if (!r || r.startsWith("#")) return false;
+    return /,DIRECT(?:,|$)/i.test(r);
+  });
+
+// ====================
+// 3. 固定规则
+// ====================
+const STATIC_RULES = [
+  "GEOSITE,category-ads-all,REJECT",
+  ...uniq(FORCE_PROXY_DOMAINS).map((d) => `DOMAIN,${d},全部`),
+  "GEOSITE,private,DIRECT",
+  "GEOIP,private,DIRECT,no-resolve",
+  "GEOSITE,google-cn,DIRECT",
+  "GEOSITE,synology,DIRECT",
+  "DOMAIN-SUFFIX,sharepoint.com,DIRECT",
+  ...uniq(BYPASS_DOMAINS).map((d) => `DOMAIN-SUFFIX,${d},DIRECT`),
+  "GEOSITE,openai,AI",
+  "GEOSITE,anthropic,AI",
+  "GEOSITE,google-gemini,AI",
+  // Gemini 兜底：这些域名同时也在 geosite:google 里，显式写死，
+  // 这样即使客户端 geo 数据旧、没有 google-gemini 这一项，也不会掉进 Google 组
+  "DOMAIN-SUFFIX,gemini.google.com,AI",
+  "DOMAIN-SUFFIX,aistudio.google.com,AI",
+  "DOMAIN-SUFFIX,ai.google.dev,AI",
+  "DOMAIN-SUFFIX,makersuite.google.com,AI",
+  "DOMAIN-SUFFIX,bard.google.com,AI",
+  "DOMAIN-SUFFIX,generativelanguage.googleapis.com,AI",
+  "DOMAIN-SUFFIX,gemini.gstatic.com,AI",
+  "DOMAIN-SUFFIX,aisandbox-pa.googleapis.com,AI",
+  "DOMAIN-SUFFIX,cloudcode-pa.googleapis.com,AI",
+  "DOMAIN-SUFFIX,alkalimakersuite-pa.clients6.google.com,AI",
+  "DOMAIN-SUFFIX,geminiweb-pa.clients6.google.com,AI",
+  "DOMAIN-SUFFIX,proactivebackend-pa.googleapis.com,AI",
+  "DOMAIN-SUFFIX,notebooklm.google.com,AI",
+  "GEOSITE,xai,AI",
+  // —— 新增：YouTube / Google 各自独立策略组（放在 AI 之后，避免 Gemini 被抢走；放在 gfw 之前更确定）——
+  "GEOSITE,youtube,YouTube",
+  "GEOSITE,google,Google",
+  "GEOSITE,gfw,全部",
+  "GEOSITE,cn,DIRECT",
+  "GEOIP,CN,DIRECT,no-resolve",
+  "MATCH,全部"
+];
+
+const STATIC_FAKE_IP_FILTER = buildFakeIpFilter(BYPASS_DOMAINS);
+
+// ====================
+// 4. 节点处理
+// ====================
+const ensureConfigObject = (input) =>
+  input && typeof input === "object" ? input : {};
+
+const getOriginalProxies = (input) =>
+  Array.isArray(input.proxies) ? input.proxies : [];
+
+const makeProxyNamesUnique = (proxies = []) => {
+  const used = new Set();
+  const nextIdx = new Map();
+
+  proxies.forEach((p) => {
+    if (!p || !p.name) return;
+    const base = String(p.name);
+    if (!used.has(base)) {
+      used.add(base);
+      nextIdx.set(base, 1);
+      return;
+    }
+    let idx = nextIdx.get(base) ?? 1;
+    let candidate = `${base}_${idx}`;
+    while (used.has(candidate)) candidate = `${base}_${++idx}`;
+    p.name = candidate;
+    used.add(candidate);
+    nextIdx.set(base, idx + 1);
+  });
+};
+
+const splitInfoAndNormalProxies = (proxies = [], filterRegex) =>
+  proxies.reduce(
+    (acc, proxy) => {
+      if (!proxy || !proxy.name) return acc;
+      (filterRegex.test(proxy.name) ? acc.infoProxies : acc.normalProxies).push(proxy);
+      return acc;
+    },
+    { infoProxies: [], normalProxies: [] }
+  );
+
+const buildAiProxyList = (allNames = []) => {
+  const nonHk = allNames.filter((n) => !HK_REGEX.test(normalizeName(n)));
+  return nonHk.length ? nonHk : allNames;
+};
+
+// ====================
+// 5. 策略组
+// ====================
+// 需要独立选节点的站点组：组名 = 规则里的策略名 = DNS 里的 #组名
+const STREAM_GROUPS = [
+  { name: "YouTube", icon: "YouTube.png" },
+  { name: "Google", icon: "Google.png" }
+];
+
+const buildProxyGroups = ({ allNames, aiNames, infoNames }) => {
+  const groups = [];
+  const add = (name, type, proxies, icon = "Available.png", extra = {}) => {
+    proxies = uniq(proxies);
+    if (name && proxies.length) {
+      groups.push({
+        name,
+        type,
+        proxies,
+        icon: SETTINGS.ICON_BASE + icon,
+        ...extra
+      });
+    }
+  };
+
+  if (allNames.length) {
+    add("URL Test - 全部", "url-test", allNames, "Available.png", SETTINGS.URL_TEST_EXTRA);
+    add("BetterFB - 全部", "url-test", allNames, "Available.png", SETTINGS.BETTER_FB_EXTRA);
+    add("全部", "select", ["BetterFB - 全部", "URL Test - 全部", ...allNames], "Available.png");
+  }
+
+  // YouTube / Google：各自一套测速组 + 手选组，互不影响
+  const streamGroupNames = [];
+  if (allNames.length) {
+    STREAM_GROUPS.forEach(({ name, icon }) => {
+      const names = allNames.filter((n) => n !== name);
+      if (!names.length) return;
+      add(`URL Test - ${name}`, "url-test", names, icon, SETTINGS.URL_TEST_EXTRA);
+      add(`BetterFB - ${name}`, "url-test", names, icon, SETTINGS.BETTER_FB_EXTRA);
+      add(
+        name,
+        "select",
+        ["全部", `BetterFB - ${name}`, `URL Test - ${name}`, ...names],
+        icon
+      );
+      streamGroupNames.push(name);
+    });
+  }
+
+  if (aiNames.length) {
+    add("URL Test - AI", "url-test", aiNames, "ChatGPT.png", SETTINGS.URL_TEST_EXTRA);
+    add("BetterFB - AI", "url-test", aiNames, "ChatGPT.png", SETTINGS.BETTER_FB_EXTRA);
+    add("AI", "select", ["BetterFB - AI", "URL Test - AI", ...aiNames], "ChatGPT.png");
+  }
+
+  if (infoNames.length) {
+    add("Info", "select", infoNames, "Available.png");
+  }
+
+  add(
+    "GLOBAL",
+    "select",
+    [
+      ...(allNames.length ? ["全部"] : []),
+      ...streamGroupNames,
+      ...(aiNames.length ? ["AI"] : []),
+      ...(infoNames.length ? ["Info"] : [])
+    ],
+    "Global.png"
+  );
+
+  return groups;
+};
+
+// ====================
+// 6. 网络配置
+// ====================
+const applyGeoData = (cfg) => {
+  cfg["geodata-mode"] = true;
+  cfg["geo-auto-update"] = true;
+  cfg["geo-update-interval"] = 24;
+  cfg["geox-url"] = {
+    ...(cfg["geox-url"] || {}),
+    geoip: SETTINGS.GEOIP_URL,
+    geosite: SETTINGS.GEOSITE_URL
+  };
+};
+
+const applySniffer = (cfg) => {
+  cfg.sniffer = {
+    ...(cfg.sniffer || {}),
+    enable: true,
+    "force-dns-mapping": true,
+    "parse-pure-ip": true,
+    "override-destination": true,
+    sniff: {
+      HTTP: { ports: [80, "8080-8880"], "override-destination": true },
+      TLS: { ports: [443, 8443] },
+      QUIC: { ports: [443, 8443] }
+    }
+  };
+};
+
+const applyTun = (cfg) => {
+  cfg.tun = {
+    ...(cfg.tun || {}),
+    enable: true,
+    stack: "system",
+    "auto-route": true,
+    "auto-detect-interface": true,
+    "strict-route": true,
+    "dns-hijack": ["any:53", "tcp://any:53"]
+  };
+};
+
+const applyDns = (cfg) => {
+  const dns = cfg.dns || {};
+  const fakeIpFilter = Array.isArray(dns["fake-ip-filter"]) ? dns["fake-ip-filter"] : [];
+  const nameserverPolicy = dns["nameserver-policy"] && typeof dns["nameserver-policy"] === "object" ? dns["nameserver-policy"] : {};
+
+  cfg.dns = {
+    ...dns,
+    enable: true,
+    "cache-algorithm": "arc",
+    listen: dns.listen,
+    ipv6: dns.ipv6,
+    "enhanced-mode": "fake-ip",
+    "fake-ip-filter-mode": "blacklist",
+    "fake-ip-filter": uniq([...fakeIpFilter, ...STATIC_FAKE_IP_FILTER]),
+    "respect-rules": true,
+    "default-nameserver": ["223.5.5.5", "119.29.29.29"],
+    "nameserver-policy": {
+      ...nameserverPolicy,
+      "pdir.cc.cd": ["https://1.1.1.1/dns-query#全部", "https://8.8.8.8/dns-query#全部"],
+      "vale.cc.cd": ["https://1.1.1.1/dns-query#全部", "https://8.8.8.8/dns-query#全部"],
+      "geosite:cn": ["223.5.5.5#DIRECT", "119.29.29.29#DIRECT"],
+      "geosite:private": "system",
+      "geosite:google-cn": ["223.5.5.5#DIRECT", "119.29.29.29#DIRECT"],
+      "geosite:synology": ["223.5.5.5#DIRECT", "119.29.29.29#DIRECT"],
+      "geosite:openai": ["https://1.1.1.1/dns-query#AI", "https://8.8.8.8/dns-query#AI"],
+      "geosite:anthropic": ["https://1.1.1.1/dns-query#AI", "https://8.8.8.8/dns-query#AI"],
+      "geosite:google-gemini": ["https://1.1.1.1/dns-query#AI", "https://8.8.8.8/dns-query#AI"],
+      "geosite:xai": ["https://1.1.1.1/dns-query#AI", "https://8.8.8.8/dns-query#AI"],
+      "geosite:google": ["https://1.1.1.1/dns-query#Google", "https://8.8.8.8/dns-query#Google"],
+      "geosite:youtube": ["https://1.1.1.1/dns-query#YouTube", "https://8.8.8.8/dns-query#YouTube"]
+    },
+    nameserver: ["https://1.1.1.1/dns-query#全部", "https://8.8.8.8/dns-query#全部"],
+    "proxy-server-nameserver": ["223.5.5.5#DIRECT", "119.29.29.29#DIRECT", "system"],
+    "direct-nameserver": ["223.5.5.5#DIRECT", "119.29.29.29#DIRECT", "system"],
+    "direct-nameserver-follow-policy": true
+  };
+};
+
+const applyProfile = (cfg) => {
+  cfg.profile = {
+    ...(cfg.profile || {}),
+    "store-selected": true,
+    "store-fake-ip": false
+  };
+};
+
+const applyRuntime = (cfg) => {
+  cfg.mode = "rule";
+  cfg["log-level"] = "warning";
+};
+
+// ====================
+// 7. 主流程
+// ====================
+function main(config) {
+  config = ensureConfigObject(config);
+  const originalProxies = getOriginalProxies(config);
+  const existingRules = Array.isArray(config.rules) ? config.rules : [];
+  delete config["rule-providers"];
+  config.rules = mergeRules(STATIC_RULES, pickDirectRules(existingRules));
+
+  if (originalProxies.length) {
+    makeProxyNamesUnique(originalProxies);
+    const { infoProxies, normalProxies } = splitInfoAndNormalProxies(originalProxies, SETTINGS.FILTER_REGEX);
+    const baseProxies = normalProxies;
+    const allNames = uniq(baseProxies.map((p) => p.name));
+    const infoNames = uniq(infoProxies.map((p) => p.name));
+    const aiNames = buildAiProxyList(allNames);
+    config["proxy-groups"] = buildProxyGroups({ allNames, aiNames, infoNames });
+    config.proxies = originalProxies;
+  }
+
+  applyGeoData(config);
+  applyRuntime(config);
+  applySniffer(config);
+  applyTun(config);
+  applyDns(config);
+  applyProfile(config);
+
+  return config;
+}
